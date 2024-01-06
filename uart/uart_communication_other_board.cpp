@@ -8,12 +8,12 @@
 #include "hardware/rtc.h"
 #include "pico/binary_info.h"
 
-
 #include "crc16.cpp"
 #include "../registers.cpp"
 
 namespace UART_BETWEEN_BOARDS {
     bool debug = true;
+    bool CommunicationOngoind = false;
     
     //uart conf
     uint         BOUND_RATE= 9600;
@@ -49,11 +49,13 @@ namespace UART_BETWEEN_BOARDS {
         uint8_t * DATA_POINTER;
         uint8_t size;
         void * funcToExecuteWhenNew;
-        DATA(uint8_t c, uint8_t * d_pointer, uint8_t s, void * toExe) {
+        bool writable;
+        DATA(uint8_t c, uint8_t * d_pointer, uint8_t s, bool writableA ,void * toExe) {
             code = c;
             DATA_POINTER = d_pointer;
             size = s;
             funcToExecuteWhenNew = toExe;
+            writable = writableA;
         }
     };
 
@@ -68,27 +70,23 @@ namespace UART_BETWEEN_BOARDS {
         TIME            = 0b0000'0111,
         HARMONOGRAM     = 0b0000'1000,
         REBOOT          = 0b0000'1001,
-        TEST0           = 0b0000'1010,
-        TEST1           = 0b0000'1011,
-
-
+        
         //DEFINE DEPENDING ON SITUATION
     };
 
-    DATA DATA_REFS[] = {
-        DATA(DataType::NOTHING      ,  nullptr        , 0  ,  nullptr),
-        DATA(DataType::ERROR_CODE   ,  DEV_ERRORS     , 5  ,  nullptr),
-        DATA(DataType::STATUS       , &DEV_STATUS     , 1  ,  nullptr),
-        DATA(DataType::BOOT         ,  nullptr        , 0  ,  nullptr),
-        DATA(DataType::OK           ,  nullptr        , 0  ,  nullptr),
-        DATA(DataType::BAD          ,  nullptr        , 0  ,  nullptr),
-        DATA(DataType::SEND_ALL     ,  nullptr        , 0  ,  nullptr),
-        DATA(DataType::TIME         ,  DEV_TIME_RAW   , 8  ,  (void *)DEV_NEW_TIME_FUNC       ),
-        DATA(DataType::HARMONOGRAM  ,  DEV_HARMONOGRAM, 90 ,  (void *)DEV_NEW_HARMONOGRAM_FUNC),
-        DATA(DataType::REBOOT       ,  nullptr        , 0  ,  (void *)doReboot),
-        DATA(DataType::TEST0        , &DEV_REG_01     , 1  ,  (void *)updatedR1),
-        DATA(DataType::TEST1        ,  DEV_REG_02     , 5  ,  (void *)updatedR2),
 
+
+    DATA DATA_REFS[] = {
+        DATA(DataType::NOTHING        ,  nullptr                   , 0   ,false,  nullptr),
+        DATA(DataType::ERROR_CODE     ,  DEV_ERRORS                , 5   ,false,  nullptr),
+        DATA(DataType::STATUS         , &DEV_STATUS                , 1   ,false,  nullptr),
+        DATA(DataType::BOOT           ,  nullptr                   , 0   ,false,  nullptr),
+        DATA(DataType::OK             ,  nullptr                   , 0   ,false,  nullptr),
+        DATA(DataType::BAD            ,  nullptr                   , 0   ,false,  nullptr),
+        DATA(DataType::SEND_ALL       ,  nullptr                   , 0   ,false,  nullptr),
+        DATA(DataType::TIME           ,  DEV_TIME_RAW              , 8   ,true ,  (void *)DEV_NEW_TIME_FUNC       ),
+        DATA(DataType::HARMONOGRAM    ,  DEV_HARMONOGRAM           , 90  ,true ,  (void *)DEV_NEW_HARMONOGRAM_FUNC),
+        DATA(DataType::REBOOT         ,  nullptr                   , 0   ,true ,  (void *)doReboot),
     };
 
     std::vector<uint8_t> FUNCTIONS_TO_EXECUTE;
@@ -284,6 +282,7 @@ namespace UART_BETWEEN_BOARDS {
     }
 
     void uart_fail_exit() {
+        CommunicationOngoind = false;
         uart_reinit();
         clearUart();
     }
@@ -324,12 +323,22 @@ namespace UART_BETWEEN_BOARDS {
                 
                 if (!DATA_REFS[reg].DATA_POINTER) {
                     counter += siz;
+                    if (DATA_REFS[reg].funcToExecuteWhenNew){
+                        if (reg == 9) {
+                            doReboot();
+                        }
+                        FUNCTIONS_TO_EXECUTE.push_back(reg);
+                        // ((void(*)(void))DATA_REFS[reg].funcToExecuteWhenNew)();
+                    }
                     continue;
                 }
                 printf("SIZE %i, REG %i\n", siz, reg);
-                for (int z = 0; z < siz; z++) { 
-                    DATA_REFS[reg].DATA_POINTER[z] = DATA_IN[counter++];
-                    printf("%i\n", DATA_REFS[reg].DATA_POINTER[z]);
+
+                if (DATA_REFS[reg].writable) {
+                    for (int z = 0; z < siz; z++) { 
+                        DATA_REFS[reg].DATA_POINTER[z] = DATA_IN[counter++];
+                        printf("%i\n", DATA_REFS[reg].DATA_POINTER[z]);
+                    }
                 }
 
                 for (int z = siz; z < DATA_REFS[reg].size; z++) DATA_REFS[reg].DATA_POINTER[z] = 0x00;
@@ -341,11 +350,10 @@ namespace UART_BETWEEN_BOARDS {
                     }
                 }
 
-                if (!DATA_REFS[reg].funcToExecuteWhenNew){
-                    continue;
-                }
-                // ((void(*)(void))DATA_REFS[reg].funcToExecuteWhenNew)();
-                FUNCTIONS_TO_EXECUTE.push_back(reg);
+                if (DATA_REFS[reg].funcToExecuteWhenNew){
+                    FUNCTIONS_TO_EXECUTE.push_back(reg);
+                    // ((void(*)(void))DATA_REFS[reg].funcToExecuteWhenNew)();
+                }                
             }
             checkForRequestedData();
             printf("DATA RECIVED\n");
@@ -435,12 +443,15 @@ namespace UART_BETWEEN_BOARDS {
     }
 
     void irqFunction() {
+        if (CommunicationOngoind) return;
+        CommunicationOngoind = true;
+
         uart_read_blocking(UART_PORT, DATA_IN,  5);
         for (int i = 0; i < 5; i++) {
             printf("\tmess raw %i \t| %i\n", DATA_IN[i], i);
         }
         if (!uartValidityCheck()) {
-            uart_reinit();
+            return uart_fail_exit();
         }
         if (!isMessForMe()) {
             printf("mess not for me\n");
@@ -453,6 +464,7 @@ namespace UART_BETWEEN_BOARDS {
         if (!checkWholeMess(5)) return uart_fail_exit();
         printf("going to recive mess\n");
         reciveMessage();
+        CommunicationOngoind = false;
     }
 
     void uart_reinit() {

@@ -16,6 +16,7 @@
 
 #include "registers.cpp"
 #include "uart/uart_communication_other_board.cpp"
+bool core_2_runnin = true;
 
 
 void loop_core2() {
@@ -24,15 +25,12 @@ void loop_core2() {
     UART_BETWEEN_BOARDS::add_dataToGet   (UART_BETWEEN_BOARDS::DataType::HARMONOGRAM);
 
     UART_BETWEEN_BOARDS::add_dataToReport(UART_BETWEEN_BOARDS::DataType::BOOT);
-    UART_BETWEEN_BOARDS::add_dataToReport(UART_BETWEEN_BOARDS::DataType::ERROR_CODE);
-
-
     UART_BETWEEN_BOARDS::init(true,true,true);
     
     while(1) {
         if (REBOOT_FLAG) {
-            watchdog_enable(1,false);
-            while(1);
+            core_2_runnin = false;
+            return;
         }
         UART_BETWEEN_BOARDS::checkForRequestedData();
         sleep_ms(50);
@@ -41,8 +39,8 @@ void loop_core2() {
 
 void loop_core1() {
     while (true) {
-        if (REBOOT_FLAG) {
-            watchdog_enable(1,false);
+        if (REBOOT_FLAG  && !core_2_runnin) {
+            watchdog_enable(1, 1);
             while(1);
         }
         UART_BETWEEN_BOARDS::executeFunctionsToBeExecuted();
